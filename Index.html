@@ -4,7 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>QR Scan Test</title>
-<!-- QR Scan Test v1.3 (2026-10-03)  ** standalone: host this file OUTSIDE Apps Script (e.g. GitHub Pages) **
+<!-- QR Scan Test v1.4 (2026-10-03)
+     v1.4: no code editing needed. The /exec address is typed into box 4 on the page and kept
+           in the browser (localStorage). A startup self-check line shows that the script is running.
+     v1.3 (2026-10-03)  ** standalone: host this file OUTSIDE Apps Script (e.g. GitHub Pages) **
      v1.3: page no longer runs inside the Apps Script iframe (camera was refused there);
            results are sent to the sheet with fetch() -> Code.gs doPost. Set GAS_URL below.
      v1.2: camera switch button (multi-lens phones), decoding alternates full frame / centre zoom,
@@ -36,7 +39,7 @@
 <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
 </head>
 <body>
-<h1>QR Scan Test v1.3 · Thử quét QR</h1>
+<h1>QR Scan Test v1.4 · Thử quét QR</h1>
 
 <div class="card noprint">
   <h2>0. 시험자 · Người thử</h2>
@@ -76,11 +79,22 @@
   <div class="qrrow" id="qrRow"></div>
 </div>
 
+<div class="card noprint">
+  <h2>4. 시트 주소 (선택) · Địa chỉ Sheet</h2>
+  <input type="text" id="gasUrl" placeholder="https://script.google.com/macros/s/.../exec">
+  <button class="alt" id="btnGas">주소 저장 · Lưu địa chỉ</button>
+  <div class="small" id="gasMsg"></div>
+</div>
+
+<div class="card noprint"><div class="small" id="selfcheck">프로그램 실행 안 됨 · Script chưa chạy</div></div>
+
 <script>
   var $ = function (id) { return document.getElementById(id); };
-  // Paste the Apps Script web app address (ends with /exec) between the quotes.
-  var GAS_URL = "https://script.google.com/macros/s/AKfycbxbNjwHO_G50PlSN_zCeAYalNsZkly4Y7qCsyhWuo98WoA-a6-Sknregf4eMt49eHqAxg/exec';
-  var hasGAS = /^https:\/\/script\.google\.com\/.+\/exec$/.test(GAS_URL);
+  // The /exec address is entered on the page (box 4) and remembered on this phone.
+  var GAS_RE = /^https:\/\/script\.google\.com\/.+\/exec$/;
+  var GAS_URL = '';
+  try { GAS_URL = localStorage.getItem('gasUrl') || ''; } catch (e) {}
+  var hasGAS = GAS_RE.test(GAS_URL);
   var video = $('video'), canvas = document.createElement('canvas');
   var ctx = canvas.getContext('2d', { willReadFrequently: true });
   var stream = null, timer = null, t0 = 0, working = false, timeoutLogged = false, camNote = '';
@@ -99,7 +113,7 @@
   function save(method, text, ms, note) {
     var row = { tester: $('tester').value, method: method, text: text, ms: ms,
                 note: note || '', ua: navigator.userAgent };
-    if (!hasGAS) { $('msg').textContent += '\n(시트 저장 안 함: GAS_URL 미설정)'; return; }
+    if (!hasGAS) { $('msg').textContent += '\n(시트 저장 안 함: 4번 주소 없음)'; return; }
     fetch(GAS_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(row) })
       .then(function (r) { return r.json(); })
       .then(function (j) { $('msg').textContent += '\n시트 저장 완료 · Đã lưu (row ' + j.row + ')'; })
@@ -291,8 +305,24 @@
       row.appendChild(box);
     });
   }
+
+  $('gasUrl').value = GAS_URL;
+  function gasState() {
+    $('gasMsg').textContent = hasGAS ? '시트 저장 사용 · Có lưu vào Sheet'
+                                     : '시트 저장 안 함 (스캔 시험은 가능) · Không lưu, vẫn quét được';
+  }
+  $('btnGas').onclick = function () {
+    GAS_URL = $('gasUrl').value.trim();
+    hasGAS = GAS_RE.test(GAS_URL);
+    try { localStorage.setItem('gasUrl', GAS_URL); } catch (e) {}
+    gasState();
+    if (GAS_URL && !hasGAS) $('gasMsg').textContent = '주소 형식이 다름: /exec 로 끝나야 함 · Địa chỉ phải kết thúc bằng /exec';
+  };
+  gasState();
+  $('selfcheck').textContent = '프로그램 실행 중 v1.4 · Script OK / jsQR: ' + (typeof jsQR === 'function' ? 'OK' : 'MISSING') +
+                               ' / QR lib: ' + (typeof QRCode === 'function' ? 'OK' : 'MISSING');
   $('btnMake').onclick = makeQR;
-  makeQR();
+  try { makeQR(); } catch (e) { $('qrRow').textContent = 'QR lib error: ' + e.message; }
 </script>
 </body>
 </html>
