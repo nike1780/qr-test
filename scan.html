@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR Scan Test</title>
+<!-- QR Scan Test v1.4 (2026-10-03)
+     v1.4: no code editing needed. The /exec address is typed into box 4 on the page and kept
+           in the browser (localStorage). A startup self-check line shows that the script is running.
+     v1.3 (2026-10-03)  ** standalone: host this file OUTSIDE Apps Script (e.g. GitHub Pages) **
+     v1.3: page no longer runs inside the Apps Script iframe (camera was refused there);
+           results are sent to the sheet with fetch() -> Code.gs doPost. Set GAS_URL below.
+     v1.2: camera switch button (multi-lens phones), decoding alternates full frame / centre zoom,
+           decoder load check, camera label and index logged.
+     v1.1: live scan rewritten (own camera loop, 1920x1080 request, BarcodeDetector + jsQR),
+           photo scan tries several sizes/crops, diagnostics shown and logged, 20 s timeout log.
+     v1.0: first version (html5-qrcode). -->
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 12px; background: #f4f5f3; color: #1f2a24; }
+  h1 { font-size: 18px; margin: 4px 0 12px; }
+  .card { background: #fff; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+  .card h2 { font-size: 15px; margin: 0 0 8px; }
+  button, .filebtn { display: block; width: 100%; box-sizing: border-box; padding: 16px; margin: 8px 0;
+    font-size: 17px; font-weight: 600; border: 0; border-radius: 10px; color: #fff; text-align: center; }
+  .go { background: #2e7d5b; } .stop { background: #8a8f8c; } .alt { background: #3b6ea5; }
+  input[type=text] { width: 100%; box-sizing: border-box; padding: 12px; font-size: 16px;
+    border: 1px solid #c9cec9; border-radius: 8px; }
+  #video { width: 100%; border-radius: 10px; background: #000; display: none; }
+  #result { font-size: 22px; font-weight: 700; word-break: break-all; min-height: 28px; }
+  #msg { font-size: 14px; white-space: pre-wrap; }
+  .ok { color: #2e7d5b; } .ng { color: #c0392b; }
+  .small { font-size: 12px; color: #6b736e; word-break: break-all; }
+  .qrrow { display: flex; flex-wrap: wrap; gap: 10mm; align-items: flex-end; }
+  .qrbox { text-align: center; font-size: 11px; }
+  .qrbox img, .qrbox canvas { display: block; }
+  @media print { .noprint { display: none; } body { background: #fff; } }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+<h1>QR Scan Test v1.4 · Thử quét QR</h1>
+
+<div class="card noprint">
+  <h2>0. 시험자 · Người thử</h2>
+  <input type="text" id="tester" placeholder="이름 또는 폰 기종 · Tên / dòng máy">
+</div>
+
+<div class="card noprint">
+  <h2>1. 카메라로 바로 스캔 · Quét trực tiếp</h2>
+  <button class="go" id="btnStart">스캔 시작 · Bắt đầu quét</button>
+  <button class="stop" id="btnStop" style="display:none">중지 · Dừng</button>
+  <video id="video"></video>
+  <button class="alt" id="btnCam" style="display:none">카메라 바꾸기 · Đổi camera</button>
+  <div class="small" id="camInfo"></div>
+</div>
+
+<div class="card noprint">
+  <h2>2. 사진으로 스캔 (1번이 안 될 때) · Chụp ảnh</h2>
+  <label class="filebtn alt">사진 찍기 · Chụp ảnh
+    <input type="file" id="file" accept="image/*" capture="environment" style="display:none">
+  </label>
+</div>
+
+<div class="card noprint">
+  <h2>결과 · Kết quả</h2>
+  <div id="result">-</div>
+  <div id="msg"></div>
+  <div class="small" id="ua"></div>
+</div>
+
+<div class="card">
+  <h2>3. 시험용 QR 인쇄 · In QR thử</h2>
+  <div class="noprint">
+    <input type="text" id="qrText" value="H26015-C01">
+    <button class="alt" id="btnMake">QR 만들기 · Tạo QR</button>
+    <button class="stop" onclick="window.print()">인쇄 · In</button>
+  </div>
+  <div class="qrrow" id="qrRow"></div>
+</div>
+
+<div class="card noprint">
+  <h2>4. 시트 주소 (선택) · Địa chỉ Sheet</h2>
+  <input type="text" id="gasUrl" placeholder="https://script.google.com/macros/s/.../exec">
+  <button class="alt" id="btnGas">주소 저장 · Lưu địa chỉ</button>
+  <div class="small" id="gasMsg"></div>
+</div>
+
+<div class="card noprint"><div class="small" id="selfcheck">프로그램 실행 안 됨 · Script chưa chạy</div></div>
+
+<script>
+  var $ = function (id) { return document.getElementById(id); };
+  // The /exec address is entered on the page (box 4) and remembered on this phone.
+  var GAS_RE = /^https:\/\/script\.google\.com\/.+\/exec$/;
+  var GAS_URL = '';
+  try { GAS_URL = localStorage.getItem('gasUrl') || ''; } catch (e) {}
+  var hasGAS = GAS_RE.test(GAS_URL);
+  var video = $('video'), canvas = document.createElement('canvas');
+  var ctx = canvas.getContext('2d', { willReadFrequently: true });
+  var stream = null, timer = null, t0 = 0, working = false, timeoutLogged = false, camNote = '';
+  var cams = [], camIdx = -1, tickN = 0;
+  var detector = null;
+  try { if ('BarcodeDetector' in window) detector = new BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { detector = null; }
+  var decoderName = (detector ? 'BarcodeDetector+' : '') + (typeof jsQR === 'function' ? 'jsQR' : 'jsQR-MISSING');
+  $('ua').textContent = navigator.userAgent;
+
+  function show(text, cls, msg) {
+    $('result').textContent = text;
+    $('result').className = cls;
+    $('msg').textContent = msg || '';
+  }
+
+  function save(method, text, ms, note) {
+    var row = { tester: $('tester').value, method: method, text: text, ms: ms,
+                note: note || '', ua: navigator.userAgent };
+    if (!hasGAS) { $('msg').textContent += '\n(시트 저장 안 함: 4번 주소 없음)'; return; }
+    fetch(GAS_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(row) })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { $('msg').textContent += '\n시트 저장 완료 · Đã lưu (row ' + j.row + ')'; })
+      .catch(function (e) { $('msg').textContent += '\n시트 저장 실패 · Lưu lỗi: ' + e.message; });
+  }
+
+  // Decode whatever is on the canvas: native detector first, then jsQR.
+  function decodeCanvas(invert) {
+    var p = detector
+      ? detector.detect(canvas).then(function (r) { return r.length ? r[0].rawValue : null; }).catch(function () { return null; })
+      : Promise.resolve(null);
+    return p.then(function (text) {
+      if (text) return text;
+      if (typeof jsQR !== 'function') return null;
+      var img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      var r = jsQR(img.data, img.width, img.height, { inversionAttempts: invert ? 'attemptBoth' : 'dontInvert' });
+      return r && r.data ? r.data : null;
+    });
+  }
+
+  function stopStream() {
+    if (timer) { clearInterval(timer); timer = null; }
+    if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+  }
+
+  function stopScan() {
+    stopStream();
+    video.style.display = 'none';
+    $('btnStop').style.display = 'none';
+    $('btnCam').style.display = 'none';
+    $('btnStart').style.display = 'block';
+  }
+
+  function tick() {
+    if (working || !stream || !video.videoWidth) return;
+    working = true;
+    tickN++;
+    var vw = video.videoWidth, vh = video.videoHeight;
+    var zoom = (tickN % 2 === 0);                             // every other frame: centre half, enlarged
+    var s = Math.min(vw, vh) * (zoom ? 0.5 : 1);
+    var out = zoom ? Math.min(1080, Math.round(s * 1.5)) : Math.min(s, 1080);
+    canvas.width = out; canvas.height = out;
+    ctx.drawImage(video, (vw - s) / 2, (vh - s) / 2, s, s, 0, 0, out, out);
+    decodeCanvas(false).then(function (text) {
+      working = false;
+      var ms = Date.now() - t0;
+      if (text && stream) {
+        if (navigator.vibrate) navigator.vibrate(120);
+        stopScan();
+        show(text, 'ok', '읽기 성공 · Đọc được  (' + ms + ' ms)');
+        save('camera', text, ms, camNote + (zoom ? ' / zoom' : ' / full'));
+      } else if (!text && ms > 20000 && !timeoutLogged) {
+        timeoutLogged = true;
+        $('msg').textContent = '20초 동안 못 읽음. 더 멀리(25~30cm) 또는 "카메라 바꾸기" · Chưa đọc được, thử xa hơn hoặc đổi camera';
+        save('camera', '', ms, 'TIMEOUT ' + camNote);
+      }
+    }).catch(function (e) {
+      working = false;
+      $('camInfo').textContent = camNote + ' / decode error: ' + (e && e.message ? e.message : e);
+    });
+  }
+
+  function openCamera(deviceId) {
+    var v = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+    if (deviceId) v.deviceId = { exact: deviceId }; else v.facingMode = { ideal: 'environment' };
+    return navigator.mediaDevices.getUserMedia({ audio: false, video: v }).then(function (s) {
+      stream = s;
+      video.setAttribute('playsinline', ''); video.setAttribute('muted', ''); video.muted = true;
+      video.srcObject = s;
+      video.style.display = 'block';
+      return video.play();
+    }).then(function () {
+      var track = stream.getVideoTracks()[0];
+      // Continuous autofocus where the browser allows it (ignored elsewhere).
+      try { track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(function () {}); } catch (e) {}
+      return navigator.mediaDevices.enumerateDevices().catch(function () { return []; });
+    }).then(function (list) {
+      var track = stream.getVideoTracks()[0];
+      var cur = track.getSettings ? track.getSettings().deviceId : '';
+      cams = list.filter(function (d) { return d.kind === 'videoinput' && !/front|user|전면|trước/i.test(d.label || ''); });
+      camIdx = -1;
+      cams.forEach(function (d, i) { if (d.deviceId === cur) camIdx = i; });
+      $('btnCam').style.display = cams.length > 1 ? 'block' : 'none';
+      $('btnStart').style.display = 'none';
+      $('btnStop').style.display = 'block';
+      $('msg').textContent = 'QR을 화면 가운데에. 흐리면 더 멀리(25~30cm) · Đưa QR vào giữa, nếu mờ thì để xa hơn';
+      t0 = Date.now(); timeoutLogged = false;
+      setTimeout(function () {
+        camNote = video.videoWidth + 'x' + video.videoHeight + ' / ' + decoderName + ' / cam ' +
+                  (camIdx + 1) + ' of ' + cams.length + ' / ' + (track.label || 'no label');
+        $('camInfo').textContent = camNote;
+      }, 500);
+      timer = setInterval(tick, 150);
+    });
+  }
+
+  function camFail(err) {
+    var s = (err && (err.name || err.message)) ? (err.name + ': ' + err.message) : String(err);
+    stopScan();
+    show('카메라 열기 실패 · Không mở được camera', 'ng', s + '\n→ 2번 사진 방식으로 시험하십시오.');
+    save('camera', '', '', 'ERROR ' + s);
+  }
+
+  $('btnStart').onclick = function () {
+    show('-', '', '카메라 여는 중 · Đang mở camera...');
+    if (typeof jsQR !== 'function' && !detector) {
+      show('판독기 로드 실패 · Không tải được bộ đọc', 'ng', 'jsQR 파일을 불러오지 못함 (네트워크 확인)');
+      save('camera', '', '', 'ERROR decoder not loaded');
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      show('카메라 열기 실패 · Không mở được camera', 'ng', 'getUserMedia 없음 → 2번 사진 방식으로 시험하십시오.');
+      save('camera', '', '', 'ERROR no getUserMedia');
+      return;
+    }
+    openCamera(null).catch(camFail);
+  };
+
+  $('btnCam').onclick = function () {
+    if (cams.length < 2) return;
+    var next = cams[(camIdx + 1) % cams.length];
+    stopStream();
+    openCamera(next.deviceId).catch(camFail);
+  };
+
+  $('btnStop').onclick = stopScan;
+
+  // Photo scan: try several sizes, each as full image and as centre crop.
+  function tryPhoto(img, plans, i) {
+    if (i >= plans.length) return Promise.resolve(null);
+    var p = plans[i], iw = img.naturalWidth, ih = img.naturalHeight;
+    var sw = iw * p.crop, sh = ih * p.crop, k = Math.min(1, p.size / Math.max(sw, sh));
+    canvas.width = Math.round(sw * k); canvas.height = Math.round(sh * k);
+    ctx.drawImage(img, (iw - sw) / 2, (ih - sh) / 2, sw, sh, 0, 0, canvas.width, canvas.height);
+    return decodeCanvas(true).then(function (text) {
+      return text ? { text: text, plan: p } : tryPhoto(img, plans, i + 1);
+    });
+  }
+
+  $('file').onchange = function (e) {
+    var f = e.target.files[0];
+    if (!f) return;
+    show('-', '', '사진 분석 중 · Đang đọc ảnh...');
+    var t1 = Date.now(), url = URL.createObjectURL(f), img = new Image();
+    img.onload = function () {
+      var plans = [];
+      [1600, 1000, 2400, 640].forEach(function (size) {
+        plans.push({ size: size, crop: 1 }); plans.push({ size: size, crop: 0.5 });
+      });
+      var info = img.naturalWidth + 'x' + img.naturalHeight + ' / ' + decoderName;
+      tryPhoto(img, plans, 0).then(function (r) {
+        var ms = Date.now() - t1;
+        if (r) {
+          show(r.text, 'ok', '읽기 성공 (사진) · Đọc được  (' + ms + ' ms)');
+          save('photo', r.text, ms, info + ' / size ' + r.plan.size + ' crop ' + r.plan.crop);
+        } else {
+          show('읽기 실패 · Không đọc được', 'ng', '사진에서 QR을 찾지 못함\n' + info);
+          save('photo', '', ms, 'NOT FOUND ' + info);
+        }
+        URL.revokeObjectURL(url);
+      });
+    };
+    img.onerror = function () {
+      show('읽기 실패 · Không đọc được', 'ng', '사진을 열 수 없음 (' + (f.type || 'type?') + ')');
+      save('photo', '', '', 'ERROR image load ' + (f.type || ''));
+    };
+    img.src = url;
+    e.target.value = '';
+  };
+
+  function makeQR() {
+    var text = $('qrText').value.trim();
+    var row = $('qrRow');
+    row.innerHTML = '';
+    [10, 15, 20, 25].forEach(function (mm) {
+      var box = document.createElement('div');
+      box.className = 'qrbox';
+      var holder = document.createElement('div');
+      holder.style.width = mm + 'mm';
+      holder.style.height = mm + 'mm';
+      box.appendChild(holder);
+      new QRCode(holder, { text: text, width: 300, height: 300, correctLevel: QRCode.CorrectLevel.M });
+      Array.prototype.forEach.call(holder.querySelectorAll('img,canvas'), function (el) {
+        el.style.width = mm + 'mm'; el.style.height = mm + 'mm';
+      });
+      var cap = document.createElement('div');
+      cap.textContent = mm + ' mm · ' + text;
+      box.appendChild(cap);
+      row.appendChild(box);
+    });
+  }
+
+  $('gasUrl').value = GAS_URL;
+  function gasState() {
+    $('gasMsg').textContent = hasGAS ? '시트 저장 사용 · Có lưu vào Sheet'
+                                     : '시트 저장 안 함 (스캔 시험은 가능) · Không lưu, vẫn quét được';
+  }
+  $('btnGas').onclick = function () {
+    GAS_URL = $('gasUrl').value.trim();
+    hasGAS = GAS_RE.test(GAS_URL);
+    try { localStorage.setItem('gasUrl', GAS_URL); } catch (e) {}
+    gasState();
+    if (GAS_URL && !hasGAS) $('gasMsg').textContent = '주소 형식이 다름: /exec 로 끝나야 함 · Địa chỉ phải kết thúc bằng /exec';
+  };
+  gasState();
+  $('selfcheck').textContent = '프로그램 실행 중 v1.4 · Script OK / jsQR: ' + (typeof jsQR === 'function' ? 'OK' : 'MISSING') +
+                               ' / QR lib: ' + (typeof QRCode === 'function' ? 'OK' : 'MISSING');
+  $('btnMake').onclick = makeQR;
+  try { makeQR(); } catch (e) { $('qrRow').textContent = 'QR lib error: ' + e.message; }
+</script>
+</body>
+</html>
